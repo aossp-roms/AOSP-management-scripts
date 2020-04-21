@@ -13,7 +13,14 @@ if [[ -f $URL ]]; then
     sendTG "Found file locally"
 else
     sendTG "Starting <a href=\"${URL}\">dump</a> on <a href=\"$BUILD_URL\">jenkins</a>"
-    aria2c -j"$(nproc)" "${URL}" || wget "${URL}" || exit 1
+    if [[ $URL =~ drive.google.com ]]; then
+        FILE_ID="$(echo "${URL:?}" | sed -r -e 's/(.*)&export.*/\1/' -e 's/https.*id=(.*)/\1/' -e 's/https.*\/d\/(.*)\/view/\1/')"
+        gdrive download "$FILE_ID" || exit 1
+    elif [[ $URL =~ mega.nz ]]; then
+        megadl "'$URL'" || exit 1
+    else
+        aria2c -j"$(nproc)" "${URL}" || wget "${URL}" || exit 1
+    fi
     sendTG "Downloaded the file"
 fi
 
@@ -66,7 +73,13 @@ find dtbo/ -name '*.dtb' -type f -exec dtc -I dtb -O dts {} -o dtbodts/"$(echo {
 for p in $PARTITIONS; do
     if [ -f "$p.img" ]; then
         mkdir "$p" || rm -rf "${p:?}"/*
-        7z x "$p".img -y -o"$p"/ || sudo mount -o loop "$p".img "$p"
+        7z x "$p".img -y -o"$p"/ || {
+        sudo mount -o loop "$p".img "$p"
+        mkdir "${p}_"
+        sudo cp -rf "${p}/*" "${p}_"
+        sudo umount "${p}"
+        sudo mv "${p}_" "${p}"
+}
         rm "$p".img
     fi
 done
@@ -175,8 +188,13 @@ git push ssh://git@github.com/$ORG/"$repo" HEAD:refs/heads/"$branch" ||
     sendTG "Pushing failed"
     exit 1
 }
+
+# Set default branch to the newly pushed branch
+curl -s -X PATCH -H "Authorization: token ${GITHUB_OAUTH_TOKEN}" -d '{ "name": "'"${repo}"'", "default_branch": "'"${branch}"'" }' "https://api.github.com/repos/${ORG}/${repo}"
+
 sendTG "Pushed <a href=\"https://github.com/$ORG/$repo\">$description</a>"
 
+# Prepare message to be sent to Telegram channel
 commit_head=$(git log -1 --format=%H)
 commit_link="https://github.com/$ORG/$repo/commit/$commit_head"
 echo -e "Sending telegram notification"
@@ -189,7 +207,13 @@ echo -e "Sending telegram notification"
     printf "\n<a href=\"%s\">Commit</a>" "$commit_link"
     printf "\n<a href=\"https://github.com/%s/%s/tree/%s/\">$codename</a>" "$ORG" "$repo" "$branch"
 ) >> tg.html
+
 TEXT=$(cat tg.html)
+
+# Send message to Telegram channel
 curl -s "https://api.telegram.org/bot${API_KEY}/sendmessage" --data "text=${TEXT}&chat_id=@android_dumps&parse_mode=HTML&disable_web_page_preview=True" > /dev/null
+
+# Delete file after sending message
 rm -fv tg.html
-sudo umount "$WORKSPACE/*" -R
+
+
